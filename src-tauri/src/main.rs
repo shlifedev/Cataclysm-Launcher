@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::sync::Mutex;
+
 mod launcher;
 
 use launcher::{
@@ -23,7 +25,11 @@ fn main() {
         .expect("direct WebDAV HTTP client should initialize");
 
     tauri::Builder::default()
-        .manage(AppState { http, webdav_http })
+        .manage(AppState {
+            http,
+            webdav_http,
+            webdav_password: Mutex::new(None),
+        })
         .invoke_handler(tauri::generate_handler![
             fetch_releases,
             install_release,

@@ -3,6 +3,7 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     process::Command,
+    sync::Mutex,
 };
 
 use chrono::Utc;
@@ -20,6 +21,7 @@ use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 pub struct AppState {
     pub http: reqwest::Client,
     pub webdav_http: reqwest::Client,
+    pub webdav_password: Mutex<Option<String>>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Hash)]
@@ -280,10 +282,20 @@ fn webdav_keychain_entry() -> AppResult<Entry> {
         .map_err(|error| format!("시스템 자격 증명 저장소에 접근하지 못했습니다: {error}"))
 }
 
-fn read_webdav_password() -> AppResult<String> {
-    webdav_keychain_entry()?
+fn read_webdav_password(state: &AppState) -> AppResult<String> {
+    let mut cached_password = state
+        .webdav_password
+        .lock()
+        .map_err(|_| "WebDAV 비밀번호 캐시에 접근하지 못했습니다.".to_string())?;
+    if let Some(password) = cached_password.as_ref() {
+        return Ok(password.clone());
+    }
+
+    let password = webdav_keychain_entry()?
         .get_password()
-        .map_err(webdav_keychain_error)
+        .map_err(webdav_keychain_error)?;
+    *cached_password = Some(password.clone());
+    Ok(password)
 }
 
 fn webdav_keychain_error(error: KeyringError) -> String {
@@ -299,17 +311,23 @@ fn webdav_keychain_error(error: KeyringError) -> String {
     }
 }
 
-fn store_webdav_password(password: &str) -> AppResult<()> {
-    let entry = webdav_keychain_entry()?;
-    entry
+fn store_webdav_password(state: &AppState, password: &str) -> AppResult<()> {
+    webdav_keychain_entry()?
         .set_password(password)
         .map_err(webdav_keychain_error)?;
-    let verified = entry.get_password().map_err(webdav_keychain_error)?;
-    if verified != password {
-        return Err(
-            "시스템 자격 증명 저장소에 저장한 WebDAV 비밀번호를 검증하지 못했습니다.".into(),
-        );
-    }
+    *state
+        .webdav_password
+        .lock()
+        .map_err(|_| "WebDAV 비밀번호 캐시에 접근하지 못했습니다.".to_string())? =
+        Some(password.to_string());
+    Ok(())
+}
+
+fn clear_webdav_password(state: &AppState) -> AppResult<()> {
+    *state
+        .webdav_password
+        .lock()
+        .map_err(|_| "WebDAV 비밀번호 캐시에 접근하지 못했습니다.".to_string())? = None;
     Ok(())
 }
 
@@ -2040,19 +2058,20 @@ pub async fn save_webdav_connection(
 ) -> AppResult<WebDavConnection> {
     let (connection, password) = normalize_webdav_connection(input)?;
     check_webdav_connection(&state, &connection, &password).await?;
-    store_webdav_password(&password)?;
+    store_webdav_password(&state, &password)?;
     ensure_webdav_directories(&state, &connection, &password).await?;
     persist_webdav_connection(&app, &connection)?;
     Ok(connection)
 }
 
 #[tauri::command]
-pub fn disconnect_webdav(app: AppHandle) -> AppResult<()> {
+pub fn disconnect_webdav(app: AppHandle, state: State<'_, AppState>) -> AppResult<()> {
     let config = webdav_config_file(&app)?;
     if config.exists() {
         fs::remove_file(config)
             .map_err(|error| format!("WebDAV 설정을 제거하지 못했습니다: {error}"))?;
     }
+    clear_webdav_password(&state)?;
     let _ = webdav_keychain_entry()?.delete_credential();
     Ok(())
 }
@@ -2064,7 +2083,7 @@ pub async fn list_remote_backups(
     game: GameId,
 ) -> AppResult<Vec<RemoteBackupRecord>> {
     let connection = read_webdav_connection(&app)?.ok_or("WebDAV 서버를 먼저 연결해 주세요.")?;
-    let password = read_webdav_password()?;
+    let password = read_webdav_password(&state)?;
     let listing = webdav_listing(
         &state,
         webdav_game_url(&connection, game)?,
@@ -2097,7 +2116,7 @@ pub async fn upload_backup(
 ) -> AppResult<RemoteBackupRecord> {
     let backup = backup_record(&app, &backup_id)?;
     let connection = read_webdav_connection(&app)?.ok_or("WebDAV 서버를 먼저 연결해 주세요.")?;
-    let password = read_webdav_password()?;
+    let password = read_webdav_password(&state)?;
     let source = PathBuf::from(&backup.archive_path);
     if !source.is_file() {
         return Err("업로드할 로컬 백업 파일을 찾지 못했습니다.".into());
@@ -2141,7 +2160,7 @@ pub async fn restore_remote_backup(
 ) -> AppResult<BackupRecord> {
     let installation = installation_record(&app, &installation_id)?;
     let connection = read_webdav_connection(&app)?.ok_or("WebDAV 서버를 먼저 연결해 주세요.")?;
-    let password = read_webdav_password()?;
+    let password = read_webdav_password(&state)?;
     let response = state
         .webdav_http
         .get(webdav_backup_url(
@@ -2622,6 +2641,7 @@ mod tests {
                 .no_proxy()
                 .build()
                 .expect("direct WebDAV client"),
+            webdav_password: Mutex::new(None),
         };
         let url = Url::parse(&format!("http://{address}/dav/folder/")).expect("test URL");
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -2633,6 +2653,20 @@ mod tests {
             .expect("fallback listing");
         server.join().expect("test server completion");
         assert!(listing.iter().any(|item| item.is_collection));
+    }
+
+    #[test]
+    fn webdav_password_is_cached_for_the_current_app_session() {
+        let state = AppState {
+            http: reqwest::Client::new(),
+            webdav_http: reqwest::Client::new(),
+            webdav_password: Mutex::new(Some("cached-password".to_string())),
+        };
+
+        assert_eq!(
+            read_webdav_password(&state).expect("cached password"),
+            "cached-password"
+        );
     }
 
     #[cfg(target_os = "macos")]
