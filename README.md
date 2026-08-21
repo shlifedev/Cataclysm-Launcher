@@ -38,4 +38,34 @@ npm run tauri dev
 npm run tauri build
 ```
 
+## CI 및 프리릴리스 배포
+
+GitHub Actions는 `main` 대상 Pull Request와 `main` 푸시에서 프런트엔드 빌드, Rust 포맷 검사, Clippy, 단위 테스트를 수행합니다. 로컬에서도 CI와 같은 검증을 다음 순서로 실행할 수 있습니다.
+
+```sh
+npm ci
+npm run build
+cargo fmt --manifest-path src-tauri/Cargo.toml --check
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+cargo test --manifest-path src-tauri/Cargo.toml --locked
+```
+
+Universal 2 DMG 프리릴리스는 `main`에 포함된 커밋에 정확한 `vX.Y.Z` 형식의 태그를 푸시하면 생성됩니다. 태그를 만들기 전에 `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`의 버전을 모두 같은 `X.Y.Z`로 맞춥니다.
+
+```sh
+git checkout main
+git pull --ff-only
+npm run check:release-version -- vX.Y.Z
+git tag vX.Y.Z
+git push origin vX.Y.Z
+```
+
+태그 작업은 Apple Silicon과 Intel Mac에서 모두 동작하는 Universal 2 DMG와 해당 SHA-256 체크섬 파일을 GitHub Prerelease에 올립니다. 내려받은 두 파일을 같은 폴더에 둔 뒤 체크섬 파일을 지정해 무결성을 확인합니다.
+
+```sh
+shasum -a 256 -c '다운로드한-DMG-파일명.dmg.sha256'
+```
+
+이 배포본은 테스트용으로 **서명 및 공증되지 않습니다**. 따라서 macOS Gatekeeper가 처음 실행할 때 경고하거나 실행을 차단할 수 있습니다. 신뢰할 수 있는 GitHub Prerelease에서 받은 파일인지와 SHA-256 검증 결과를 확인한 경우에만 사용하세요.
+
 GitHub API는 레포지토리별 가장 최근 1,000개 릴리즈만 반환하므로, 런처도 그 범위까지만 표시합니다.

@@ -1332,10 +1332,10 @@ fn create_backup_snapshot(app: &AppHandle, installation_id: &str) -> AppResult<B
 
 fn is_allowed_backup_path(path: &Path) -> bool {
     let mut components = path.components();
-    match components.next() {
-        Some(std::path::Component::Normal(first)) if first == "config" || first == "save" => true,
-        _ => false,
-    }
+    matches!(
+        components.next(),
+        Some(std::path::Component::Normal(first)) if first == "config" || first == "save"
+    )
 }
 
 fn validate_backup_archive(
