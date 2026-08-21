@@ -19,6 +19,7 @@ use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
 pub struct AppState {
     pub http: reqwest::Client,
+    pub webdav_http: reqwest::Client,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Hash)]
@@ -558,7 +559,7 @@ async fn send_webdav_propfind(
     depth: &'static str,
 ) -> AppResult<reqwest::Response> {
     state
-        .http
+        .webdav_http
         .request(dav_method(b"PROPFIND")?, url)
         .header("Depth", depth)
         .header(header::ACCEPT, "application/xml, text/xml")
@@ -644,7 +645,7 @@ async fn ensure_webdav_collection(
     password: &str,
 ) -> AppResult<()> {
     let response = state
-        .http
+        .webdav_http
         .request(dav_method(b"MKCOL")?, url.clone())
         .basic_auth(username, Some(password))
         .send()
@@ -2112,7 +2113,7 @@ pub async fn upload_backup(
         .map_err(|error| format!("업로드할 백업 파일을 열지 못했습니다: {error}"))?;
     let body = reqwest::Body::wrap_stream(ReaderStream::new(file));
     let response = state
-        .http
+        .webdav_http
         .put(destination)
         .header(header::CONTENT_TYPE, "application/zip")
         .basic_auth(&connection.username, Some(&password))
@@ -2142,7 +2143,7 @@ pub async fn restore_remote_backup(
     let connection = read_webdav_connection(&app)?.ok_or("WebDAV 서버를 먼저 연결해 주세요.")?;
     let password = read_webdav_password()?;
     let response = state
-        .http
+        .webdav_http
         .get(webdav_backup_url(
             &connection,
             installation.game,
@@ -2553,7 +2554,7 @@ mod tests {
     }
 
     #[test]
-    fn webdav_propfind_retries_405_without_trailing_slash() {
+    fn webdav_propfind_bypasses_proxy_and_retries_405_without_trailing_slash() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("test server");
         let address = listener.local_addr().expect("test server address");
         let server = thread::spawn(move || {
@@ -2613,7 +2614,14 @@ mod tests {
         });
 
         let state = AppState {
-            http: reqwest::Client::builder().build().expect("HTTP client"),
+            http: reqwest::Client::builder()
+                .proxy(reqwest::Proxy::all("http://127.0.0.1:9").expect("test proxy"))
+                .build()
+                .expect("proxied HTTP client"),
+            webdav_http: reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .expect("direct WebDAV client"),
         };
         let url = Url::parse(&format!("http://{address}/dav/folder/")).expect("test URL");
         let runtime = tokio::runtime::Builder::new_current_thread()
