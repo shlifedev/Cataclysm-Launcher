@@ -221,6 +221,15 @@ struct InstallProgress {
 
 type AppResult<T> = Result<T, String>;
 
+const WEBDAV_PROPFIND_BODY: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<d:propfind xmlns:d="DAV:">
+  <d:prop>
+    <d:resourcetype/>
+    <d:getcontentlength/>
+    <d:getlastmodified/>
+  </d:prop>
+</d:propfind>"#;
+
 fn app_root(app: &AppHandle) -> AppResult<PathBuf> {
     app.path()
         .app_data_dir()
@@ -513,6 +522,9 @@ fn webdav_error(status: StatusCode) -> String {
             "WebDAV 인증에 실패했습니다. 사용자명 또는 앱 비밀번호를 확인해 주세요.".into()
         }
         StatusCode::NOT_FOUND => "WebDAV 서버 또는 지정한 경로를 찾지 못했습니다.".into(),
+        StatusCode::METHOD_NOT_ALLOWED => {
+            "WebDAV 폴더 조회가 거부되었습니다 (HTTP 405). 웹 관리 화면 주소가 아니라 PROPFIND를 지원하는 실제 WebDAV 서버 URL인지 확인해 주세요.".into()
+        }
         _ => format!(
             "WebDAV 서버 요청을 완료하지 못했습니다 (HTTP {}).",
             status.as_u16()
@@ -524,7 +536,21 @@ fn dav_method(value: &'static [u8]) -> AppResult<Method> {
     Method::from_bytes(value).map_err(|_| "WebDAV 요청 방식을 만들지 못했습니다.".to_string())
 }
 
-async fn webdav_propfind(
+fn alternate_collection_url(mut url: Url) -> Option<Url> {
+    let path = url.path();
+    if path == "/" {
+        return None;
+    }
+    let alternate = if path.ends_with('/') {
+        path.trim_end_matches('/').to_string()
+    } else {
+        format!("{path}/")
+    };
+    url.set_path(&alternate);
+    Some(url)
+}
+
+async fn send_webdav_propfind(
     state: &AppState,
     url: Url,
     username: &str,
@@ -535,10 +561,70 @@ async fn webdav_propfind(
         .http
         .request(dav_method(b"PROPFIND")?, url)
         .header("Depth", depth)
+        .header(header::ACCEPT, "application/xml, text/xml")
+        .header(header::CONTENT_TYPE, "application/xml; charset=utf-8")
         .basic_auth(username, Some(password))
+        .body(WEBDAV_PROPFIND_BODY)
         .send()
         .await
         .map_err(|error| format!("WebDAV 서버에 연결하지 못했습니다: {error}"))
+}
+
+async fn webdav_propfind(
+    state: &AppState,
+    url: Url,
+    username: &str,
+    password: &str,
+    depth: &'static str,
+) -> AppResult<reqwest::Response> {
+    let alternate_url = alternate_collection_url(url.clone());
+    let response = send_webdav_propfind(state, url, username, password, depth).await?;
+    if matches!(
+        response.status(),
+        StatusCode::METHOD_NOT_ALLOWED | StatusCode::NOT_FOUND
+    ) {
+        if let Some(alternate_url) = alternate_url {
+            let alternate =
+                send_webdav_propfind(state, alternate_url, username, password, depth).await?;
+            if alternate.status().as_u16() == 207 {
+                return Ok(alternate);
+            }
+        }
+    }
+    Ok(response)
+}
+
+async fn webdav_listing(
+    state: &AppState,
+    url: Url,
+    username: &str,
+    password: &str,
+    depth: &'static str,
+) -> AppResult<Vec<WebDavListingItem>> {
+    let response = webdav_propfind(state, url, username, password, depth).await?;
+    if response.status().as_u16() != 207 {
+        return Err(webdav_error(response.status()));
+    }
+    parse_webdav_listing(
+        &response
+            .text()
+            .await
+            .map_err(|error| format!("WebDAV 응답을 읽지 못했습니다: {error}"))?,
+    )
+}
+
+async fn verify_webdav_collection(
+    state: &AppState,
+    url: Url,
+    username: &str,
+    password: &str,
+) -> AppResult<()> {
+    let listing = webdav_listing(state, url, username, password, "0").await?;
+    if listing.iter().any(|item| item.is_collection) {
+        Ok(())
+    } else {
+        Err("지정한 WebDAV 경로가 폴더 컬렉션이 아닙니다.".into())
+    }
 }
 
 async fn check_webdav_connection(
@@ -548,12 +634,7 @@ async fn check_webdav_connection(
 ) -> AppResult<()> {
     let endpoint = Url::parse(&connection.endpoint)
         .map_err(|_| "저장된 WebDAV 서버 URL이 올바르지 않습니다.")?;
-    let response = webdav_propfind(state, endpoint, &connection.username, password, "0").await?;
-    if response.status().is_success() || response.status().as_u16() == 207 {
-        Ok(())
-    } else {
-        Err(webdav_error(response.status()))
-    }
+    verify_webdav_collection(state, endpoint, &connection.username, password).await
 }
 
 async fn ensure_webdav_collection(
@@ -564,17 +645,16 @@ async fn ensure_webdav_collection(
 ) -> AppResult<()> {
     let response = state
         .http
-        .request(dav_method(b"MKCOL")?, url)
+        .request(dav_method(b"MKCOL")?, url.clone())
         .basic_auth(username, Some(password))
         .send()
         .await
         .map_err(|error| format!("WebDAV 폴더를 만들지 못했습니다: {error}"))?;
-    if response.status() == StatusCode::CREATED
-        || response.status() == StatusCode::METHOD_NOT_ALLOWED
-    {
-        Ok(())
-    } else {
-        Err(webdav_error(response.status()))
+    match response.status() {
+        StatusCode::CREATED | StatusCode::METHOD_NOT_ALLOWED => {
+            verify_webdav_collection(state, url, username, password).await
+        }
+        status => Err(webdav_error(status)),
     }
 }
 
@@ -600,6 +680,14 @@ async fn ensure_webdav_directories(
             webdav_game_url(connection, game)?,
             &connection.username,
             password,
+        )
+        .await?;
+        webdav_listing(
+            state,
+            webdav_game_url(connection, game)?,
+            &connection.username,
+            password,
+            "1",
         )
         .await?;
     }
@@ -1976,7 +2064,7 @@ pub async fn list_remote_backups(
 ) -> AppResult<Vec<RemoteBackupRecord>> {
     let connection = read_webdav_connection(&app)?.ok_or("WebDAV 서버를 먼저 연결해 주세요.")?;
     let password = read_webdav_password()?;
-    let response = webdav_propfind(
+    let listing = webdav_listing(
         &state,
         webdav_game_url(&connection, game)?,
         &connection.username,
@@ -1984,15 +2072,6 @@ pub async fn list_remote_backups(
         "1",
     )
     .await?;
-    if !(response.status().is_success() || response.status().as_u16() == 207) {
-        return Err(webdav_error(response.status()));
-    }
-    let listing = parse_webdav_listing(
-        &response
-            .text()
-            .await
-            .map_err(|error| format!("WebDAV 응답을 읽지 못했습니다: {error}"))?,
-    )?;
     let mut backups = listing
         .into_iter()
         .filter(|item| !item.is_collection)
@@ -2160,7 +2239,7 @@ pub fn reveal_installation(app: AppHandle, installation_id: String) -> AppResult
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read;
+    use std::{io::Read, net::TcpListener, thread};
 
     fn asset(name: &str) -> ReleaseAsset {
         ReleaseAsset {
@@ -2450,6 +2529,102 @@ mod tests {
             root_folder: "CataclysmHub/../other".to_string(),
         });
         assert!(unsafe_folder.is_err());
+    }
+
+    #[test]
+    fn webdav_collection_url_fallback_toggles_trailing_slash() {
+        let with_slash = Url::parse("https://cloud.example.com/dav/folder/").expect("url");
+        let without_slash = alternate_collection_url(with_slash).expect("alternate without slash");
+        assert_eq!(without_slash.path(), "/dav/folder");
+
+        let restored = alternate_collection_url(without_slash).expect("alternate with slash");
+        assert_eq!(restored.path(), "/dav/folder/");
+        assert!(
+            alternate_collection_url(Url::parse("https://cloud.example.com/").expect("root"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn webdav_propfind_requests_required_listing_properties() {
+        assert!(WEBDAV_PROPFIND_BODY.contains("<d:resourcetype/>"));
+        assert!(WEBDAV_PROPFIND_BODY.contains("<d:getcontentlength/>"));
+        assert!(WEBDAV_PROPFIND_BODY.contains("<d:getlastmodified/>"));
+    }
+
+    #[test]
+    fn webdav_propfind_retries_405_without_trailing_slash() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test server");
+        let address = listener.local_addr().expect("test server address");
+        let server = thread::spawn(move || {
+            for (request_number, expected_path) in [(1, "/dav/folder/"), (2, "/dav/folder")] {
+                let (mut stream, _) = listener.accept().expect("test request");
+                let mut bytes = Vec::new();
+                loop {
+                    let mut chunk = [0_u8; 4096];
+                    let count = stream.read(&mut chunk).expect("read test request");
+                    if count == 0 {
+                        break;
+                    }
+                    bytes.extend_from_slice(&chunk[..count]);
+                    let request = String::from_utf8_lossy(&bytes);
+                    let Some(header_end) = request.find("\r\n\r\n") else {
+                        continue;
+                    };
+                    let content_length = request[..header_end]
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or_default();
+                    if bytes.len() >= header_end + 4 + content_length {
+                        break;
+                    }
+                }
+
+                let request = String::from_utf8(bytes).expect("UTF-8 test request");
+                assert!(request.starts_with(&format!("PROPFIND {expected_path} HTTP/1.1")));
+                assert!(request.to_ascii_lowercase().contains("depth: 1"));
+                assert!(request.contains(WEBDAV_PROPFIND_BODY));
+
+                if request_number == 1 {
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .expect("write 405 response");
+                } else {
+                    let body = r#"<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:">
+  <d:response><d:href>/dav/folder/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response>
+</d:multistatus>"#;
+                    let response = format!(
+                        "HTTP/1.1 207 Multi-Status\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    stream
+                        .write_all(response.as_bytes())
+                        .expect("write 207 response");
+                }
+            }
+        });
+
+        let state = AppState {
+            http: reqwest::Client::builder().build().expect("HTTP client"),
+        };
+        let url = Url::parse(&format!("http://{address}/dav/folder/")).expect("test URL");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let listing = runtime
+            .block_on(webdav_listing(&state, url, "user", "password", "1"))
+            .expect("fallback listing");
+        server.join().expect("test server completion");
+        assert!(listing.iter().any(|item| item.is_collection));
     }
 
     #[cfg(target_os = "macos")]
