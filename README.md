@@ -32,10 +32,16 @@ npm ci
 npm run tauri dev
 ```
 
-Windows 개발에는 Tauri의 Windows 사전 요구 사항인 Microsoft C++ Build Tools와 WebView2가 필요합니다. 배포용 앱은 각 운영체제에서 다음 명령으로 빌드합니다. macOS에서는 앱/DMG가, Windows에서는 MSI/NSIS 설치 프로그램이 만들어집니다.
+Windows 개발에는 Tauri의 Windows 사전 요구 사항인 Microsoft C++ Build Tools와 WebView2가 필요합니다. macOS 앱/DMG는 기본 번들 명령으로 빌드합니다.
 
 ```sh
 npm run tauri build
+```
+
+Windows 배포본은 설치 과정 없이 바로 실행할 수 있는 단일 portable EXE로 빌드합니다.
+
+```sh
+npm run tauri -- build --no-bundle
 ```
 
 ## CI 및 프리릴리스 배포
@@ -50,7 +56,7 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D w
 cargo test --manifest-path src-tauri/Cargo.toml --locked
 ```
 
-macOS Universal 2 DMG와 Windows x64 NSIS 프리릴리스는 `main`에 포함된 커밋에 정확한 `vX.Y.Z` 형식의 태그를 푸시하면 함께 생성됩니다. 태그를 만들기 전에 `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`의 버전을 모두 같은 `X.Y.Z`로 맞춥니다.
+macOS Universal 2 DMG와 Windows x64 portable EXE 프리릴리스는 `main`에 포함된 커밋에 정확한 `vX.Y.Z` 형식의 태그를 푸시하면 함께 생성됩니다. 태그를 만들기 전에 `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`의 버전을 모두 같은 `X.Y.Z`로 맞춥니다.
 
 ```sh
 git checkout main
@@ -60,7 +66,7 @@ git tag vX.Y.Z
 git push origin vX.Y.Z
 ```
 
-태그 작업은 Apple Silicon과 Intel Mac에서 모두 동작하는 Universal 2 DMG, Windows x64 설치 프로그램과 각각의 SHA-256 체크섬 파일을 GitHub Prerelease에 올립니다. macOS에서는 내려받은 파일과 체크섬을 같은 폴더에 둔 뒤 다음처럼 확인합니다.
+태그 작업은 Apple Silicon과 Intel Mac에서 모두 동작하는 Universal 2 DMG, 설치 없이 실행하는 Windows x64 portable EXE와 각각의 SHA-256 체크섬 파일을 GitHub Prerelease에 올립니다. macOS에서는 내려받은 파일과 체크섬을 같은 폴더에 둔 뒤 다음처럼 확인합니다.
 
 ```sh
 shasum -a 256 -c '다운로드한-DMG-파일명.dmg.sha256'

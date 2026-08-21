@@ -39,13 +39,6 @@
     ],
     "macOS": {
       "minimumSystemVersion": "11.0"
-    },
-    "windows": {
-      "allowDowngrades": false,
-      "nsis": {
-        "installMode": "currentUser",
-        "languages": ["Korean", "English"]
-      }
     }
   }
 }

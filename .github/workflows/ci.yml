@@ -70,7 +70,7 @@ jobs:
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked
 
   build-windows-artifact:
-    name: Build Windows installer artifact
+    name: Build Windows portable executable artifact
     needs: verify
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: windows-2022
@@ -103,14 +103,41 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build unsigned Windows NSIS installer
-        run: npm run tauri -- build --bundles nsis --ci -- --locked
+      - name: Build unsigned Windows portable executable
+        run: npm run tauri -- build --no-bundle --ci -- --locked
 
-      - name: Upload Windows installer
+      - name: Validate Windows portable executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = Join-Path $env:GITHUB_WORKSPACE 'src-tauri\target\release\cataclysm-hub.exe'
+          if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+            throw "Windows portable executable was not created: $source"
+          }
+
+          $binary = Get-Item -LiteralPath $source
+          if ($binary.Length -lt 1MB) {
+            throw "Windows portable executable is unexpectedly small: $($binary.Length) bytes."
+          }
+
+          $stream = [System.IO.File]::OpenRead($binary.FullName)
+          try {
+            if ($stream.ReadByte() -ne 0x4D -or $stream.ReadByte() -ne 0x5A) {
+              throw 'Windows portable executable does not have a valid PE header.'
+            }
+          } finally {
+            $stream.Dispose()
+          }
+
+          $outputDirectory = Join-Path $env:RUNNER_TEMP 'windows-portable'
+          New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
+          Copy-Item -LiteralPath $binary.FullName -Destination (Join-Path $outputDirectory 'Cataclysm-Hub-windows-x64.exe')
+
+      - name: Upload Windows portable executable
         uses: actions/upload-artifact@v4
         with:
-          name: cataclysm-hub-windows-x64-${{ github.run_number }}
-          path: src-tauri/target/release/bundle/nsis/*.exe
+          name: cataclysm-hub-windows-x64-portable-${{ github.run_number }}
+          path: ${{ runner.temp }}/windows-portable/Cataclysm-Hub-windows-x64.exe
           if-no-files-found: error
           retention-days: 14
 
@@ -284,9 +311,9 @@ jobs:
         if: runner.os == 'macOS'
         run: npm run tauri -- build --target universal-apple-darwin --bundles dmg --no-sign --ci -- --locked
 
-      - name: Build unsigned Windows NSIS installer
+      - name: Build unsigned Windows portable executable
         if: runner.os == 'Windows'
-        run: npm run tauri -- build --bundles nsis --ci -- --locked
+        run: npm run tauri -- build --no-bundle --ci -- --locked
 
       - name: Validate macOS release asset
         if: runner.os == 'macOS'
@@ -357,24 +384,20 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $installerDirectory = Join-Path $env:GITHUB_WORKSPACE 'src-tauri\target\release\bundle\nsis'
-          if (-not (Test-Path -LiteralPath $installerDirectory -PathType Container)) {
-            throw "NSIS output directory was not created: $installerDirectory"
+          $source = Join-Path $env:GITHUB_WORKSPACE 'src-tauri\target\release\cataclysm-hub.exe'
+          if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+            throw "Windows portable executable was not created: $source"
           }
 
-          $installers = @(Get-ChildItem -LiteralPath $installerDirectory -Filter '*.exe' -File)
-          if ($installers.Count -ne 1) {
-            throw "Expected exactly one NSIS installer, found $($installers.Count)."
-          }
-          $installer = $installers[0]
-          if ($installer.Length -lt 1MB) {
-            throw "NSIS installer is unexpectedly small: $($installer.Length) bytes."
+          $binary = Get-Item -LiteralPath $source
+          if ($binary.Length -lt 1MB) {
+            throw "Windows portable executable is unexpectedly small: $($binary.Length) bytes."
           }
 
-          $stream = [System.IO.File]::OpenRead($installer.FullName)
+          $stream = [System.IO.File]::OpenRead($binary.FullName)
           try {
             if ($stream.ReadByte() -ne 0x4D -or $stream.ReadByte() -ne 0x5A) {
-              throw 'NSIS installer does not have a valid Windows PE header.'
+              throw 'Windows portable executable does not have a valid PE header.'
             }
           } finally {
             $stream.Dispose()
@@ -382,12 +405,12 @@ jobs:
 
           $releaseDirectory = Join-Path $env:RUNNER_TEMP 'release-assets'
           New-Item -ItemType Directory -Force -Path $releaseDirectory | Out-Null
-          $releaseInstaller = Join-Path $releaseDirectory $installer.Name
-          Copy-Item -LiteralPath $installer.FullName -Destination $releaseInstaller
-          $hash = (Get-FileHash -LiteralPath $releaseInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
-          $checksum = "$hash  $($installer.Name)`n"
+          $releaseExecutable = Join-Path $releaseDirectory 'Cataclysm-Hub-windows-x64.exe'
+          Copy-Item -LiteralPath $binary.FullName -Destination $releaseExecutable
+          $hash = (Get-FileHash -LiteralPath $releaseExecutable -Algorithm SHA256).Hash.ToLowerInvariant()
+          $checksum = "$hash  Cataclysm-Hub-windows-x64.exe`n"
           $utf8 = [System.Text.UTF8Encoding]::new($false)
-          [System.IO.File]::WriteAllText("$releaseInstaller.sha256", $checksum, $utf8)
+          [System.IO.File]::WriteAllText("$releaseExecutable.sha256", $checksum, $utf8)
 
       - name: Upload validated release asset
         uses: actions/upload-artifact@v4
@@ -419,9 +442,9 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
           dmgs=( release-assets/*.dmg )
-          installers=( release-assets/*.exe )
+          executables=( release-assets/*.exe )
           checksums=( release-assets/*.sha256 )
-          if [ "${#dmgs[@]}" -ne 1 ] || [ "${#installers[@]}" -ne 1 ] || [ "${#checksums[@]}" -ne 2 ]; then
+          if [ "${#dmgs[@]}" -ne 1 ] || [ "${#executables[@]}" -ne 1 ] || [ "${#checksums[@]}" -ne 2 ]; then
             printf 'Expected one DMG, one EXE, and two checksums.\n' >&2
             find release-assets -maxdepth 1 -type f -print >&2
             exit 1
