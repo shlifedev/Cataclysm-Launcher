@@ -19,6 +19,10 @@ type Installing = Record<number, InstallProgress | undefined>;
 type InstallationLocation = "install" | "config" | "save";
 type LoadStatus = "idle" | "loading" | "loaded" | "error";
 type VersionChannel = "Stable" | "Experimental" | "Nightly";
+type RestoreConfirmation = {
+  installation: InstallRecord;
+  backup: RemoteBackupRecord;
+};
 
 const games: Array<{ id: GameId; label: string; subtitle: string }> = [
   { id: "dda", label: "CDDA", subtitle: "Dark Days Ahead" },
@@ -120,6 +124,7 @@ export function App() {
   const [remoteBackups, setRemoteBackups] = useState<Record<GameId, RemoteBackupRecord[]>>({ dda: [], bn: [] });
   const [remoteBackupStatus, setRemoteBackupStatus] = useState<Record<GameId, LoadStatus>>({ dda: "idle", bn: "idle" });
   const [cloudBusy, setCloudBusy] = useState<string>();
+  const [restoreConfirmation, setRestoreConfirmation] = useState<RestoreConfirmation>();
   const [backupNotice, setBackupNotice] = useState<string>();
   const [error, setError] = useState<string>();
   const requestedPages = useRef(new Set<string>());
@@ -185,6 +190,10 @@ export function App() {
   useEffect(() => {
     function closeOverlay(event: KeyboardEvent) {
       if (event.key !== "Escape") return;
+      if (restoreConfirmation) {
+        setRestoreConfirmation(undefined);
+        return;
+      }
       if (webdavDialogOpen) {
         if (!cloudBusy) setWebdavDialogOpen(false);
         return;
@@ -196,7 +205,7 @@ export function App() {
 
     window.addEventListener("keydown", closeOverlay);
     return () => window.removeEventListener("keydown", closeOverlay);
-  }, [cloudBusy, versionDialogOpen, webdavDialogOpen]);
+  }, [cloudBusy, restoreConfirmation, versionDialogOpen, webdavDialogOpen]);
 
   const gameReleases = releases[activeGame];
   const activeGameInfo = games.find((game) => game.id === activeGame)!;
@@ -413,10 +422,7 @@ export function App() {
   }
 
   async function restoreRemoteBackup(record: InstallRecord, backup: RemoteBackupRecord) {
-    const confirmed = window.confirm(
-      `현재 ${activeGameInfo.label}의 설정과 세이브를 이 클라우드 백업으로 교체할까요? 복원 전 현재 데이터는 자동으로 로컬 백업됩니다.`,
-    );
-    if (!confirmed) return;
+    setRestoreConfirmation(undefined);
     setCloudBusy(`restore:${backup.fileName}`);
     setError(undefined);
     try {
@@ -674,7 +680,7 @@ export function App() {
                           {remoteBackups[activeGame].map((remote) => (
                             <div className="remote-backup-row" key={remote.fileName}>
                               <div><strong title={remote.fileName}>{remote.fileName}</strong><span>{remote.modifiedAt ? formatDate(remote.modifiedAt) : "날짜 정보 없음"} · {formatBytes(remote.size)}</span></div>
-                              <button className="text-button" disabled={cloudBusy === `restore:${remote.fileName}`} onClick={() => void restoreRemoteBackup(currentInstallation, remote)}>
+                              <button className="text-button" disabled={cloudBusy === `restore:${remote.fileName}`} onClick={() => setRestoreConfirmation({ installation: currentInstallation, backup: remote })}>
                                 {cloudBusy === `restore:${remote.fileName}` ? "복원 중" : "복원"}
                               </button>
                             </div>
@@ -818,6 +824,27 @@ export function App() {
                 <button className="button primary" type="submit" disabled={Boolean(cloudBusy)}>{cloudBusy === "save" ? "저장 중" : "저장"}</button>
               </div>
             </form>
+          </section>
+        </div>
+      )}
+
+      {restoreConfirmation && (
+        <div className="dialog-backdrop" role="presentation" onMouseDown={() => setRestoreConfirmation(undefined)}>
+          <section className="webdav-dialog restore-dialog" role="dialog" aria-modal="true" aria-labelledby="restore-dialog-title" onMouseDown={(event) => event.stopPropagation()}>
+            <header>
+              <div>
+                <h2 id="restore-dialog-title">클라우드 백업 복원</h2>
+                <p>{games.find((game) => game.id === restoreConfirmation.installation.game)?.label} 데이터를 교체합니다.</p>
+              </div>
+              <button className="icon-button" aria-label="복원 취소" onClick={() => setRestoreConfirmation(undefined)}><CloseIcon /></button>
+            </header>
+            <p className="restore-warning">
+              현재 설정과 세이브를 <strong>{restoreConfirmation.backup.fileName}</strong> 백업으로 교체합니다. 복원 전 현재 데이터는 자동으로 로컬 백업됩니다.
+            </p>
+            <div className="dialog-actions">
+              <button autoFocus className="button secondary" type="button" onClick={() => setRestoreConfirmation(undefined)}>취소</button>
+              <button className="button primary" type="button" onClick={() => void restoreRemoteBackup(restoreConfirmation.installation, restoreConfirmation.backup)}>복원 시작</button>
+            </div>
           </section>
         </div>
       )}
