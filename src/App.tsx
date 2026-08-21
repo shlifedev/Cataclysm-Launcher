@@ -360,7 +360,7 @@ export function App() {
   }
 
   async function disconnectWebdav() {
-    if (!window.confirm("이 Mac의 WebDAV 연결 정보와 키체인 비밀번호를 제거할까요? 원격 백업 파일은 삭제되지 않습니다.")) return;
+    if (!window.confirm("이 기기의 WebDAV 연결 정보와 저장된 비밀번호를 제거할까요? 원격 백업 파일은 삭제되지 않습니다.")) return;
     setCloudBusy("disconnect");
     setError(undefined);
     try {
@@ -534,7 +534,7 @@ export function App() {
                 </div>
               )}
 
-              <p className="settings-note">비밀번호는 이 Mac의 키체인에 보관됩니다.</p>
+              <p className="settings-note">비밀번호는 운영체제의 보안 자격 증명 저장소에 보관됩니다.</p>
             </section>
           </div>
         </section>
@@ -630,7 +630,7 @@ export function App() {
                             <div className="backup-row" key={backup.id}>
                               <div><strong>{formatDate(backup.createdAt)}</strong><span>{formatBytes(backup.size)}</span></div>
                               <div className="inline-actions">
-                                <button onClick={() => void revealBackup(backup)}>Finder</button>
+                                <button onClick={() => void revealBackup(backup)}>위치 보기</button>
                                 <button onClick={() => void exportBackup(backup)}>내보내기</button>
                                 {webdavConnection && (
                                   <button disabled={cloudBusy === `upload:${backup.id}`} onClick={() => void uploadBackup(backup)}>
@@ -810,7 +810,7 @@ export function App() {
               <label>앱 비밀번호
                 <input type="password" required autoComplete="current-password" placeholder="WebDAV 앱 비밀번호" value={webdavForm.password} onChange={(event) => setWebdavForm((current) => ({ ...current, password: event.target.value }))} />
               </label>
-              <p className="webdav-security-note">비밀번호는 이 Mac의 키체인에만 저장됩니다.</p>
+              <p className="webdav-security-note">비밀번호는 운영체제의 보안 자격 증명 저장소에만 저장됩니다.</p>
               {webdavForm.endpoint.trim().toLowerCase().startsWith("http://") && <p className="webdav-http-warning">HTTP 연결은 비밀번호와 백업 데이터를 암호화하지 않습니다.</p>}
               <div className="dialog-actions">
                 {webdavConnection && <button className="dialog-danger" type="button" disabled={Boolean(cloudBusy)} onClick={() => void disconnectWebdav()}>연결 해제</button>}

@@ -267,7 +267,7 @@ fn persist_webdav_connection(app: &AppHandle, connection: &WebDavConnection) -> 
 
 fn webdav_keychain_entry() -> AppResult<Entry> {
     Entry::new("gg.cataclysm.hub.webdav", "default")
-        .map_err(|error| format!("macOS 키체인에 접근하지 못했습니다: {error}"))
+        .map_err(|error| format!("시스템 자격 증명 저장소에 접근하지 못했습니다: {error}"))
 }
 
 fn read_webdav_password() -> AppResult<String> {
@@ -280,12 +280,12 @@ fn webdav_keychain_error(error: KeyringError) -> String {
     match error {
         KeyringError::NoEntry => "WebDAV 비밀번호를 찾지 못했습니다. 클라우드 연결을 다시 설정해 주세요.".into(),
         KeyringError::NoStorageAccess(detail) => format!(
-            "macOS 키체인에 접근할 수 없습니다. 로그인 키체인이 잠겨 있거나 앱 접근이 거부됐을 수 있습니다: {detail}"
+            "시스템 자격 증명 저장소에 접근할 수 없습니다. 저장소가 잠겨 있거나 앱 접근이 거부됐을 수 있습니다: {detail}"
         ),
         KeyringError::PlatformFailure(detail) => {
-            format!("macOS 키체인 작업에 실패했습니다: {detail}")
+            format!("시스템 자격 증명 저장소 작업에 실패했습니다: {detail}")
         }
-        other => format!("WebDAV 키체인 항목을 처리하지 못했습니다: {other}"),
+        other => format!("WebDAV 자격 증명을 처리하지 못했습니다: {other}"),
     }
 }
 
@@ -296,7 +296,9 @@ fn store_webdav_password(password: &str) -> AppResult<()> {
         .map_err(webdav_keychain_error)?;
     let verified = entry.get_password().map_err(webdav_keychain_error)?;
     if verified != password {
-        return Err("macOS 키체인에 저장한 WebDAV 비밀번호를 검증하지 못했습니다.".into());
+        return Err(
+            "시스템 자격 증명 저장소에 저장한 WebDAV 비밀번호를 검증하지 못했습니다.".into(),
+        );
     }
     Ok(())
 }
@@ -376,10 +378,52 @@ fn read_cached_page(app: &AppHandle, game: GameId, page: u16) -> Option<CachedRe
 fn write_json<T: Serialize + ?Sized>(path: &Path, value: &T) -> AppResult<()> {
     let parent = path.parent().ok_or("저장 경로가 올바르지 않습니다")?;
     fs::create_dir_all(parent).map_err(|error| format!("폴더를 만들지 못했습니다: {error}"))?;
-    let pending = path.with_extension("pending");
+    let pending = parent.join(format!(".pending-{}", Uuid::new_v4()));
     let bytes = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
     fs::write(&pending, bytes).map_err(|error| format!("데이터를 저장하지 못했습니다: {error}"))?;
-    fs::rename(&pending, path).map_err(|error| format!("데이터를 확정하지 못했습니다: {error}"))
+    let result = replace_file(&pending, path)
+        .map_err(|error| format!("데이터를 확정하지 못했습니다: {error}"));
+    if result.is_err() {
+        let _ = fs::remove_file(&pending);
+    }
+    result
+}
+
+#[cfg(not(target_os = "windows"))]
+fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::rename(source, destination)
+}
+
+#[cfg(target_os = "windows")]
+fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::{iter, os::windows::ffi::OsStrExt};
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(iter::once(0))
+        .collect::<Vec<_>>();
+    let destination = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(iter::once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: Both pointers reference null-terminated UTF-16 buffers for the duration of the call.
+    let moved = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 fn read_installations(app: &AppHandle) -> AppResult<Vec<InstallRecord>> {
@@ -785,48 +829,77 @@ async fn fetch_release(state: &AppState, game: GameId, release_id: u64) -> AppRe
     Ok((game, github).into())
 }
 
-fn recommend_asset(game: GameId, assets: &[ReleaseAsset]) -> Option<ReleaseAsset> {
-    let architecture = std::env::consts::ARCH;
+fn recommend_asset_for(
+    game: GameId,
+    assets: &[ReleaseAsset],
+    operating_system: &str,
+    architecture: &str,
+) -> Option<ReleaseAsset> {
     assets
         .iter()
         .filter_map(|asset| {
             let name = asset.name.to_ascii_lowercase();
-            if !name.ends_with(".dmg")
-                || !name.contains("osx")
-                || name.contains("no-soundpack")
-                || name.contains("curses")
-                || name.contains("terminal")
-            {
-                return None;
-            }
-
-            let has_tiles = match game {
-                GameId::Dda => name.contains("with-graphics") || name.contains("tiles"),
-                GameId::Bn => name.contains("tiles"),
-            };
-            if !has_tiles {
-                return None;
-            }
-
             let is_arm = name.contains("-arm-") || name.contains("_arm_") || name.contains("arm64");
             let is_x64 =
                 name.contains("-x64-") || name.contains("_x64_") || name.contains("x86_64");
             let is_universal = name.contains("universal");
-            if (architecture == "aarch64" && is_x64 && !is_universal)
-                || (architecture == "x86_64" && is_arm && !is_universal)
-            {
-                return None;
-            }
-
-            let score = 100
-                + i32::from(is_universal) * 30
-                + i32::from(architecture == "aarch64" && is_arm) * 20
-                + i32::from(architecture == "x86_64" && is_x64) * 20
-                + i32::from(name.contains("with-graphics")) * 5;
+            let score = match operating_system {
+                "macos" => {
+                    if !name.ends_with(".dmg")
+                        || !name.contains("osx")
+                        || name.contains("no-soundpack")
+                        || name.contains("curses")
+                        || name.contains("terminal")
+                    {
+                        return None;
+                    }
+                    let has_tiles = match game {
+                        GameId::Dda => name.contains("with-graphics") || name.contains("tiles"),
+                        GameId::Bn => name.contains("tiles"),
+                    };
+                    if !has_tiles
+                        || (architecture == "aarch64" && is_x64 && !is_universal)
+                        || (architecture == "x86_64" && is_arm && !is_universal)
+                    {
+                        return None;
+                    }
+                    100 + i32::from(is_universal) * 30
+                        + i32::from(architecture == "aarch64" && is_arm) * 20
+                        + i32::from(architecture == "x86_64" && is_x64) * 20
+                        + i32::from(name.contains("with-graphics")) * 5
+                }
+                "windows" => {
+                    if architecture != "x86_64"
+                        || !name.ends_with(".zip")
+                        || !name.contains("windows")
+                        || !is_x64
+                        || name.contains("no-soundpack")
+                        || name.contains("pdb")
+                        || name.contains("curses")
+                        || name.contains("terminal")
+                    {
+                        return None;
+                    }
+                    let has_tiles = match game {
+                        GameId::Dda => name.contains("with-graphics") || name.contains("tiles"),
+                        GameId::Bn => name.contains("tiles"),
+                    };
+                    if !has_tiles {
+                        return None;
+                    }
+                    100 + i32::from(name.contains("and-sounds")) * 30
+                        + i32::from(name.contains("msvc")) * 5
+                }
+                _ => return None,
+            };
             Some((score, asset.clone()))
         })
         .max_by_key(|(score, _)| *score)
         .map(|(_, asset)| asset)
+}
+
+fn recommend_asset(game: GameId, assets: &[ReleaseAsset]) -> Option<ReleaseAsset> {
+    recommend_asset_for(game, assets, std::env::consts::OS, std::env::consts::ARCH)
 }
 
 fn emit_progress(
@@ -919,6 +992,7 @@ async fn download_asset(
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 fn run_command(command: &mut Command, description: &str) -> AppResult<()> {
     let output = command
         .output()
@@ -934,6 +1008,7 @@ fn run_command(command: &mut Command, description: &str) -> AppResult<()> {
     })
 }
 
+#[cfg(target_os = "macos")]
 fn find_app_bundle(mount: &Path) -> AppResult<PathBuf> {
     fs::read_dir(mount)
         .map_err(|error| format!("DMG 내용을 읽지 못했습니다: {error}"))?
@@ -943,6 +1018,7 @@ fn find_app_bundle(mount: &Path) -> AppResult<PathBuf> {
         .ok_or_else(|| "DMG에서 게임 앱 번들을 찾지 못했습니다.".into())
 }
 
+#[cfg(target_os = "macos")]
 fn find_tile_executable(app_bundle: &Path, game: GameId) -> AppResult<PathBuf> {
     let resources = app_bundle.join("Contents").join("Resources");
     let preferred = match game {
@@ -966,6 +1042,7 @@ fn find_tile_executable(app_bundle: &Path, game: GameId) -> AppResult<PathBuf> {
         .ok_or_else(|| "게임의 그래픽 실행 파일을 찾지 못했습니다.".into())
 }
 
+#[cfg(target_os = "macos")]
 fn unpack_dmg(
     app: &AppHandle,
     game: GameId,
@@ -1073,6 +1150,232 @@ fn unpack_dmg(
     result
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn is_safe_windows_archive_path(path: &Path) -> bool {
+    const RESERVED_NAMES: [&str; 22] = [
+        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+        "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+    ];
+
+    path.components().all(|component| {
+        let std::path::Component::Normal(component) = component else {
+            return false;
+        };
+        let name = component.to_string_lossy();
+        if name.is_empty()
+            || name.ends_with([' ', '.'])
+            || name
+                .chars()
+                .any(|character| character.is_control() || r#"<>:"/\|?*"#.contains(character))
+        {
+            return false;
+        }
+        let stem = name
+            .split('.')
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        !RESERVED_NAMES.contains(&stem.as_str())
+    })
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn extract_windows_game_zip(archive_path: &Path, destination: &Path) -> AppResult<()> {
+    const MAX_UNPACKED_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+
+    let file = fs::File::open(archive_path)
+        .map_err(|error| format!("다운로드한 게임 ZIP을 열지 못했습니다: {error}"))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|error| format!("다운로드한 파일은 올바른 ZIP이 아닙니다: {error}"))?;
+    let unpacked_size = (0..archive.len()).try_fold(0_u64, |total, index| {
+        let entry = archive
+            .by_index(index)
+            .map_err(|error| format!("게임 ZIP 항목을 읽지 못했습니다: {error}"))?;
+        total
+            .checked_add(entry.size())
+            .ok_or_else(|| "게임 ZIP의 압축 해제 크기가 너무 큽니다.".to_string())
+    })?;
+    if unpacked_size > MAX_UNPACKED_BYTES {
+        return Err("게임 ZIP의 압축 해제 크기가 안전 제한을 초과합니다.".into());
+    }
+
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|error| format!("게임 ZIP 항목을 읽지 못했습니다: {error}"))?;
+        if entry.is_symlink() {
+            return Err("게임 ZIP에 지원하지 않는 심볼릭 링크가 포함되어 있습니다.".into());
+        }
+        let relative_path = entry
+            .enclosed_name()
+            .ok_or("게임 ZIP에 안전하지 않은 파일 경로가 포함되어 있습니다.")?;
+        if relative_path.as_os_str().is_empty() || !is_safe_windows_archive_path(&relative_path) {
+            return Err(
+                "게임 ZIP에 Windows에서 안전하지 않은 파일 경로가 포함되어 있습니다.".into(),
+            );
+        }
+        let output_path = destination.join(relative_path);
+        if entry.is_dir() {
+            fs::create_dir_all(&output_path)
+                .map_err(|error| format!("게임 폴더를 만들지 못했습니다: {error}"))?;
+            continue;
+        }
+        let parent = output_path
+            .parent()
+            .ok_or("게임 파일의 설치 경로가 올바르지 않습니다.")?;
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("게임 폴더를 만들지 못했습니다: {error}"))?;
+        let mut output = fs::File::create(&output_path)
+            .map_err(|error| format!("게임 파일을 만들지 못했습니다: {error}"))?;
+        std::io::copy(&mut entry, &mut output)
+            .map_err(|error| format!("게임 파일을 압축 해제하지 못했습니다: {error}"))?;
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_executable_priority(game: GameId, file_name: &str) -> Option<u8> {
+    let name = file_name.to_ascii_lowercase();
+    let candidates: &[&str] = match game {
+        GameId::Dda => &["cataclysm-tiles.exe", "cataclysm.exe"],
+        GameId::Bn => &[
+            "cataclysm-bn-tiles.exe",
+            "cataclysm-tiles.exe",
+            "cataclysm-bn.exe",
+        ],
+    };
+    if let Some(index) = candidates.iter().position(|candidate| name == *candidate) {
+        return Some((candidates.len() - index) as u8 + 10);
+    }
+    (name.ends_with(".exe")
+        && name.contains("cataclysm")
+        && (name.contains("tiles") || name == "cataclysm.exe")
+        && !name.contains("test"))
+    .then_some(1)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn find_windows_executable(root: &Path, game: GameId) -> AppResult<PathBuf> {
+    let mut directories = vec![root.to_path_buf()];
+    let mut best: Option<(u8, PathBuf)> = None;
+    while let Some(directory) = directories.pop() {
+        for entry in fs::read_dir(&directory)
+            .map_err(|error| format!("게임 설치 폴더를 읽지 못했습니다: {error}"))?
+        {
+            let entry = entry.map_err(|error| format!("게임 파일을 읽지 못했습니다: {error}"))?;
+            let file_type = entry
+                .file_type()
+                .map_err(|error| format!("게임 파일 정보를 읽지 못했습니다: {error}"))?;
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                directories.push(entry.path());
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let Some(priority) = windows_executable_priority(game, &name) else {
+                continue;
+            };
+            if best
+                .as_ref()
+                .is_none_or(|(best_priority, _)| priority > *best_priority)
+            {
+                best = Some((priority, entry.path()));
+            }
+        }
+    }
+    best.map(|(_, path)| path)
+        .ok_or_else(|| "게임의 Windows 그래픽 실행 파일을 찾지 못했습니다.".into())
+}
+
+#[cfg(target_os = "windows")]
+fn unpack_windows_zip(
+    app: &AppHandle,
+    game: GameId,
+    release: &Release,
+    asset: &ReleaseAsset,
+    archive_path: &Path,
+) -> AppResult<InstallRecord> {
+    let root = app_root(app)?;
+    let install_root = root.join("installs").join(game.key());
+    let final_dir = install_root.join(release.id.to_string());
+    if final_dir.exists() {
+        return Err("이 릴리즈는 이미 설치되어 있습니다.".into());
+    }
+    fs::create_dir_all(&install_root)
+        .map_err(|error| format!("설치 폴더를 만들지 못했습니다: {error}"))?;
+    let staging = install_root.join(format!(".staging-{}", Uuid::new_v4()));
+    fs::create_dir_all(&staging)
+        .map_err(|error| format!("임시 설치 폴더를 만들지 못했습니다: {error}"))?;
+
+    emit_progress(
+        app,
+        release.id,
+        "unpacking",
+        0,
+        asset.size,
+        "게임 ZIP을 압축 해제하는 중",
+    );
+    let result = (|| -> AppResult<InstallRecord> {
+        extract_windows_game_zip(archive_path, &staging)?;
+        let executable = find_windows_executable(&staging, game)?;
+        fs::rename(&staging, &final_dir)
+            .map_err(|error| format!("설치본을 확정하지 못했습니다: {error}"))?;
+        let final_executable = final_dir.join(
+            executable
+                .strip_prefix(&staging)
+                .map_err(|_| "실행 파일 경로를 확정하지 못했습니다")?,
+        );
+        let user_dir = game_user_dir(app, game)?;
+        fs::create_dir_all(&user_dir)
+            .map_err(|error| format!("게임 데이터 폴더를 만들지 못했습니다: {error}"))?;
+        Ok(InstallRecord {
+            id: format!("{}-{}", game.key(), release.id),
+            game,
+            release_id: release.id,
+            tag: release.tag.clone(),
+            name: release.name.clone(),
+            asset_name: asset.name.clone(),
+            installed_at: Utc::now().to_rfc3339(),
+            install_dir: final_dir.to_string_lossy().to_string(),
+            user_dir: user_dir.to_string_lossy().to_string(),
+            executable_path: final_executable.to_string_lossy().to_string(),
+        })
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&staging);
+    }
+    result
+}
+
+#[cfg(target_os = "macos")]
+fn unpack_release_asset(
+    app: &AppHandle,
+    game: GameId,
+    release: &Release,
+    asset: &ReleaseAsset,
+    archive_path: &Path,
+) -> AppResult<InstallRecord> {
+    unpack_dmg(app, game, release, asset, archive_path)
+}
+
+#[cfg(target_os = "windows")]
+fn unpack_release_asset(
+    app: &AppHandle,
+    game: GameId,
+    release: &Release,
+    asset: &ReleaseAsset,
+    archive_path: &Path,
+) -> AppResult<InstallRecord> {
+    unpack_windows_zip(app, game, release, asset, archive_path)
+}
+
 #[tauri::command]
 pub async fn install_release(
     app: AppHandle,
@@ -1122,9 +1425,9 @@ pub async fn install_release(
     let asset = release
         .recommended_asset
         .clone()
-        .ok_or("현재 Mac에서 설치할 수 있는 그래픽·사운드 빌드가 없습니다.")?;
+        .ok_or("현재 운영체제와 CPU에서 설치할 수 있는 그래픽·사운드 빌드가 없습니다.")?;
     let download = app_root(&app)?.join("downloads").join(format!(
-        "{}-{}.dmg.partial",
+        "{}-{}.download.partial",
         game.key(),
         release.id
     ));
@@ -1141,14 +1444,14 @@ pub async fn install_release(
         let app_for_task = app.clone();
         let release_for_task = release.clone();
         let asset_for_task = asset.clone();
-        let dmg_for_task = download.clone();
+        let archive_for_task = download.clone();
         let record = tokio::task::spawn_blocking(move || {
-            unpack_dmg(
+            unpack_release_asset(
                 &app_for_task,
                 game,
                 &release_for_task,
                 &asset_for_task,
-                &dmg_for_task,
+                &archive_for_task,
             )
         })
         .await
@@ -1513,20 +1816,42 @@ fn restore_downloaded_backup(
     result
 }
 
-fn open_in_finder(path: &Path, reveal: bool, description: &str) -> AppResult<()> {
+fn open_in_file_manager(path: &Path, reveal: bool, description: &str) -> AppResult<()> {
     if !path.exists() {
         return Err(format!(
             "{description}이 아직 없습니다. 게임을 한 번 실행한 뒤 다시 시도해 주세요."
         ));
     }
-    let mut command = Command::new("/usr/bin/open");
-    if reveal {
-        command.arg("-R");
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = Command::new("/usr/bin/open");
+        if reveal {
+            command.arg("-R");
+        }
+        command
+            .arg(path)
+            .spawn()
+            .map_err(|error| format!("Finder에서 {description}을 열지 못했습니다: {error}"))?;
     }
-    command
-        .arg(path)
-        .spawn()
-        .map_err(|error| format!("Finder에서 {description}을 열지 못했습니다: {error}"))?;
+
+    #[cfg(target_os = "windows")]
+    {
+        let mut command = Command::new("explorer.exe");
+        if reveal {
+            command.arg("/select,");
+        }
+        command
+            .arg(path)
+            .spawn()
+            .map_err(|error| format!("파일 탐색기에서 {description}을 열지 못했습니다: {error}"))?;
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = reveal;
+        return Err("이 운영체제에서는 파일 위치 열기를 지원하지 않습니다.".into());
+    }
     Ok(())
 }
 
@@ -1548,7 +1873,7 @@ pub fn reveal_installation_location(
             "세이브 폴더",
         ),
     };
-    open_in_finder(&path, false, description)
+    open_in_file_manager(&path, false, description)
 }
 
 #[tauri::command]
@@ -1572,7 +1897,7 @@ pub fn list_backups(app: AppHandle, installation_id: String) -> AppResult<Vec<Ba
 #[tauri::command]
 pub fn reveal_backup(app: AppHandle, backup_id: String) -> AppResult<()> {
     let backup = backup_record(&app, &backup_id)?;
-    open_in_finder(Path::new(&backup.archive_path), true, "백업 파일")
+    open_in_file_manager(Path::new(&backup.archive_path), true, "백업 파일")
 }
 
 #[tauri::command]
@@ -1804,7 +2129,7 @@ pub fn launch_installation(app: AppHandle, installation_id: String) -> AppResult
         .ok_or("설치된 버전을 찾지 못했습니다.")?;
     let executable = PathBuf::from(&record.executable_path);
     if !executable.is_file() {
-        return Err("게임 실행 파일이 없습니다. Finder에서 설치 폴더를 확인해 주세요.".into());
+        return Err("게임 실행 파일이 없습니다. 설치 폴더를 확인해 주세요.".into());
     }
     let resources = executable
         .parent()
@@ -1812,12 +2137,16 @@ pub fn launch_installation(app: AppHandle, installation_id: String) -> AppResult
     let user_dir = game_user_dir(&app, record.game)?;
     fs::create_dir_all(&user_dir)
         .map_err(|error| format!("게임 데이터 폴더를 만들지 못했습니다: {error}"))?;
-    Command::new(&executable)
+    let mut command = Command::new(&executable);
+    command
         .current_dir(resources)
         .arg("--userdir")
-        .arg(&user_dir)
+        .arg(&user_dir);
+    #[cfg(target_os = "macos")]
+    command
         .env("DYLD_LIBRARY_PATH", ".")
-        .env("DYLD_FRAMEWORK_PATH", ".")
+        .env("DYLD_FRAMEWORK_PATH", ".");
+    command
         .spawn()
         .map_err(|error| format!("게임을 실행하지 못했습니다: {error}"))?;
     Ok(())
@@ -1894,14 +2223,30 @@ mod tests {
     }
 
     #[test]
+    fn json_persistence_replaces_an_existing_file() {
+        let root = std::env::temp_dir().join(format!("cataclysm-hub-json-test-{}", Uuid::new_v4()));
+        let path = root.join("state.json");
+        write_json(&path, &serde_json::json!({ "revision": 1 })).expect("first write");
+        write_json(&path, &serde_json::json!({ "revision": 2 })).expect("replacement write");
+
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("read replacement"))
+                .expect("valid replacement JSON");
+        assert_eq!(value["revision"], 2);
+        fs::remove_dir_all(root).expect("test cleanup");
+    }
+
+    #[test]
     fn dda_prefers_graphics_universal_build_over_terminal_build() {
-        let selected = recommend_asset(
+        let selected = recommend_asset_for(
             GameId::Dda,
             &[
                 asset("cdda-osx-terminal-only-universal.dmg"),
                 asset("cdda-osx-with-graphics-universal.dmg"),
                 asset("cdda-osx-with-graphics-universal-no-soundpack.dmg"),
             ],
+            "macos",
+            "aarch64",
         )
         .expect("a graphics build should be selected");
 
@@ -1910,22 +2255,101 @@ mod tests {
 
     #[test]
     fn bn_selects_the_current_architecture_tiles_build() {
-        let selected = recommend_asset(
+        let arm_selected = recommend_asset_for(
             GameId::Bn,
             &[
                 asset("cbn-osx-tiles-arm-build.dmg"),
                 asset("cbn-osx-tiles-x64-build.dmg"),
                 asset("cbn-osx-curses-arm-build.dmg"),
             ],
+            "macos",
+            "aarch64",
         )
         .expect("a matching architecture build should be selected");
+        assert_eq!(arm_selected.name, "cbn-osx-tiles-arm-build.dmg");
 
-        let expected = if std::env::consts::ARCH == "aarch64" {
-            "cbn-osx-tiles-arm-build.dmg"
-        } else {
-            "cbn-osx-tiles-x64-build.dmg"
-        };
-        assert_eq!(selected.name, expected);
+        let x64_selected = recommend_asset_for(
+            GameId::Bn,
+            &[
+                asset("cbn-osx-tiles-arm-build.dmg"),
+                asset("cbn-osx-tiles-x64-build.dmg"),
+            ],
+            "macos",
+            "x86_64",
+        )
+        .expect("an x64 build should be selected");
+        assert_eq!(x64_selected.name, "cbn-osx-tiles-x64-build.dmg");
+    }
+
+    #[test]
+    fn windows_selects_graphics_sound_builds_and_ignores_symbols() {
+        let dda = recommend_asset_for(
+            GameId::Dda,
+            &[
+                asset("cdda-windows-with-graphics-x64-build.zip"),
+                asset("cdda-windows-with-graphics-and-sounds-x64-build.zip"),
+                asset("cdda-osx-with-graphics-universal-build.dmg"),
+            ],
+            "windows",
+            "x86_64",
+        )
+        .expect("DDA Windows build");
+        assert_eq!(
+            dda.name,
+            "cdda-windows-with-graphics-and-sounds-x64-build.zip"
+        );
+
+        let bn = recommend_asset_for(
+            GameId::Bn,
+            &[
+                asset("cbn-windows-tiles-x64-msvc-build-pdb.zip"),
+                asset("cbn-windows-tiles-x64-msvc-no-soundpack-build.zip"),
+                asset("cbn-windows-tiles-x64-msvc-build.zip"),
+            ],
+            "windows",
+            "x86_64",
+        )
+        .expect("BN Windows build");
+        assert_eq!(bn.name, "cbn-windows-tiles-x64-msvc-build.zip");
+
+        assert!(recommend_asset_for(GameId::Dda, &[dda], "windows", "aarch64").is_none());
+    }
+
+    #[test]
+    fn windows_zip_is_extracted_and_graphical_executable_is_found() {
+        let root =
+            std::env::temp_dir().join(format!("cataclysm-hub-install-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("test root");
+        let archive_path = root.join("game.zip");
+        let destination = root.join("game");
+        let file = fs::File::create(&archive_path).expect("zip file");
+        let mut writer = ZipWriter::new(file);
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        writer
+            .start_file("distribution/Cataclysm.exe", options)
+            .expect("executable entry");
+        writer.write_all(b"MZtest").expect("executable contents");
+        writer
+            .start_file("distribution/data/core.json", options)
+            .expect("data entry");
+        writer.write_all(b"{}").expect("data contents");
+        writer.finish().expect("finish zip");
+
+        extract_windows_game_zip(&archive_path, &destination).expect("extract game");
+        let executable =
+            find_windows_executable(&destination, GameId::Dda).expect("find graphical executable");
+        assert_eq!(
+            executable.file_name().and_then(|name| name.to_str()),
+            Some("Cataclysm.exe")
+        );
+        assert!(destination
+            .join("distribution")
+            .join("data")
+            .join("core.json")
+            .is_file());
+        assert!(!is_safe_windows_archive_path(Path::new("../escape.exe")));
+        assert!(!is_safe_windows_archive_path(Path::new("CON")));
+        fs::remove_dir_all(root).expect("test cleanup");
     }
 
     #[test]
@@ -2036,6 +2460,17 @@ mod tests {
         assert!(entry
             .get_credential()
             .downcast_ref::<keyring::macos::MacCredential>()
+            .is_some());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn webdav_password_uses_windows_credential_backend() {
+        let entry = webdav_keychain_entry().expect("credential entry");
+
+        assert!(entry
+            .get_credential()
+            .downcast_ref::<keyring::windows::WinCredential>()
             .is_some());
     }
 }

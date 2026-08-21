@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_dispatch:
   pull_request:
     branches:
       - main
@@ -15,8 +16,16 @@ permissions:
 
 jobs:
   verify:
-    name: Verify
-    runs-on: macos-14
+    name: Verify (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS
+            os: macos-14
+          - label: Windows
+            os: windows-2022
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Check out source
@@ -33,7 +42,6 @@ jobs:
         uses: dtolnay/rust-toolchain@1.94.0
         with:
           components: rustfmt, clippy
-          targets: aarch64-apple-darwin, x86_64-apple-darwin
 
       - name: Restore Cargo cache
         uses: actions/cache@v4
@@ -61,13 +69,66 @@ jobs:
       - name: Test Rust
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked
 
-  release:
-    name: Publish prerelease
+  build-windows-artifact:
+    name: Build Windows installer artifact
+    needs: verify
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: windows-2022
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.21.1
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@1.94.0
+
+      - name: Restore Cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-artifact-rust-1.94.0-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-artifact-rust-1.94.0-
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build unsigned Windows NSIS installer
+        run: npm run tauri -- build --bundles nsis --ci -- --locked
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: cataclysm-hub-windows-x64-${{ github.run_number }}
+          path: src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+          retention-days: 14
+
+  build-prerelease:
+    name: Build prerelease (${{ matrix.label }})
     needs: verify
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    runs-on: macos-14
-    permissions:
-      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS Universal 2
+            os: macos-14
+            artifact: macos
+          - label: Windows x64
+            os: windows-2022
+            artifact: windows
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Check out tagged source
@@ -84,9 +145,10 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@1.94.0
-        with:
-          components: rustfmt, clippy
-          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - name: Add Universal 2 Rust targets
+        if: runner.os == 'macOS'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
       - name: Restore Cargo cache
         uses: actions/cache@v4
@@ -95,9 +157,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             src-tauri/target
-          key: ${{ runner.os }}-rust-1.94.0-${{ hashFiles('src-tauri/Cargo.lock') }}
+          key: ${{ runner.os }}-release-rust-1.94.0-${{ hashFiles('src-tauri/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-rust-1.94.0-
+            ${{ runner.os }}-release-rust-1.94.0-
 
       - name: Install frontend dependencies
         run: npm ci
@@ -118,10 +180,15 @@ jobs:
           fi
 
       - name: Build unsigned Universal 2 DMG
+        if: runner.os == 'macOS'
         run: npm run tauri -- build --target universal-apple-darwin --bundles dmg --no-sign --ci -- --locked
 
-      - name: Validate release assets
-        id: release_assets
+      - name: Build unsigned Windows NSIS installer
+        if: runner.os == 'Windows'
+        run: npm run tauri -- build --bundles nsis --ci -- --locked
+
+      - name: Validate macOS release asset
+        if: runner.os == 'macOS'
         shell: bash
         run: |
           set -euo pipefail
@@ -140,7 +207,6 @@ jobs:
             exit 1
           fi
           dmg_path="${dmgs[0]}"
-
           hdiutil verify "$dmg_path"
 
           mount_dir="$(mktemp -d)"
@@ -155,7 +221,6 @@ jobs:
 
           hdiutil attach "$dmg_path" -nobrowse -readonly -mountpoint "$mount_dir" >/dev/null
           mounted=1
-
           apps=( "$mount_dir"/*.app )
           if [ "${#apps[@]}" -ne 1 ]; then
             printf 'Expected exactly one app bundle in the DMG, found %s.\n' "${#apps[@]}" >&2
@@ -166,11 +231,6 @@ jobs:
           app_path="${apps[0]}"
           executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_path/Contents/Info.plist")"
           binary_path="$app_path/Contents/MacOS/$executable"
-          if [ ! -f "$binary_path" ]; then
-            printf 'App executable was not found: %s\n' "$binary_path" >&2
-            exit 1
-          fi
-
           architectures="$(lipo -archs "$binary_path")"
           for required_architecture in arm64 x86_64; do
             case " $architectures " in
@@ -185,15 +245,86 @@ jobs:
           release_dir="$RUNNER_TEMP/release-assets"
           mkdir -p "$release_dir"
           dmg_name="$(basename "$dmg_path")"
-          release_dmg="$release_dir/$dmg_name"
-          cp "$dmg_path" "$release_dmg"
+          cp "$dmg_path" "$release_dir/$dmg_name"
           (
             cd "$release_dir"
             shasum -a 256 "$dmg_name" > "$dmg_name.sha256"
           )
 
-          printf 'dmg_path=%s\n' "$release_dmg" >> "$GITHUB_OUTPUT"
-          printf 'checksum_path=%s\n' "$release_dmg.sha256" >> "$GITHUB_OUTPUT"
+      - name: Validate Windows release asset
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installerDirectory = Join-Path $env:GITHUB_WORKSPACE 'src-tauri\target\release\bundle\nsis'
+          if (-not (Test-Path -LiteralPath $installerDirectory -PathType Container)) {
+            throw "NSIS output directory was not created: $installerDirectory"
+          }
+
+          $installers = @(Get-ChildItem -LiteralPath $installerDirectory -Filter '*.exe' -File)
+          if ($installers.Count -ne 1) {
+            throw "Expected exactly one NSIS installer, found $($installers.Count)."
+          }
+          $installer = $installers[0]
+          if ($installer.Length -lt 1MB) {
+            throw "NSIS installer is unexpectedly small: $($installer.Length) bytes."
+          }
+
+          $stream = [System.IO.File]::OpenRead($installer.FullName)
+          try {
+            if ($stream.ReadByte() -ne 0x4D -or $stream.ReadByte() -ne 0x5A) {
+              throw 'NSIS installer does not have a valid Windows PE header.'
+            }
+          } finally {
+            $stream.Dispose()
+          }
+
+          $releaseDirectory = Join-Path $env:RUNNER_TEMP 'release-assets'
+          New-Item -ItemType Directory -Force -Path $releaseDirectory | Out-Null
+          $releaseInstaller = Join-Path $releaseDirectory $installer.Name
+          Copy-Item -LiteralPath $installer.FullName -Destination $releaseInstaller
+          $hash = (Get-FileHash -LiteralPath $releaseInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
+          $checksum = "$hash  $($installer.Name)`n"
+          $utf8 = [System.Text.UTF8Encoding]::new($false)
+          [System.IO.File]::WriteAllText("$releaseInstaller.sha256", $checksum, $utf8)
+
+      - name: Upload validated release asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: prerelease-${{ matrix.artifact }}
+          path: ${{ runner.temp }}/release-assets/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-prerelease:
+    name: Publish prerelease
+    needs: build-prerelease
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download validated release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: prerelease-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Validate complete release set
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          dmgs=( release-assets/*.dmg )
+          installers=( release-assets/*.exe )
+          checksums=( release-assets/*.sha256 )
+          if [ "${#dmgs[@]}" -ne 1 ] || [ "${#installers[@]}" -ne 1 ] || [ "${#checksums[@]}" -ne 2 ]; then
+            printf 'Expected one DMG, one EXE, and two checksums.\n' >&2
+            find release-assets -maxdepth 1 -type f -print >&2
+            exit 1
+          fi
 
       - name: Create or update prerelease
         shell: bash
@@ -202,6 +333,7 @@ jobs:
         run: |
           set -euo pipefail
           tag="$GITHUB_REF_NAME"
+          warning='⚠️ These macOS and Windows testing builds are unsigned. Verify the matching SHA-256 checksum before use.'
 
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --title "Cataclysm Hub $tag"
@@ -212,11 +344,7 @@ jobs:
               --title "Cataclysm Hub $tag" \
               --prerelease \
               --generate-notes \
-              --notes '⚠️ This testing prerelease is unsigned and not notarized. Verify the SHA-256 checksum before use.'
+              --notes "$warning"
           fi
 
-          gh release upload "$tag" \
-            "${{ steps.release_assets.outputs.dmg_path }}" \
-            "${{ steps.release_assets.outputs.checksum_path }}" \
-            --repo "$GITHUB_REPOSITORY" \
-            --clobber
+          gh release upload "$tag" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
