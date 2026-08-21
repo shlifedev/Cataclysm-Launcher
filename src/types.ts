@@ -35,6 +35,7 @@ export type InstallRecord = {
   installedAt: string;
   installDir: string;
   userDir: string;
+  executablePath: string;
 };
 
 export type InstallProgress = {

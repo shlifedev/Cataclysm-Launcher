@@ -14,9 +14,16 @@ fn main() {
         .user_agent("Cataclysm-Hub/0.1")
         .build()
         .expect("HTTP client should initialize");
+    // WebDAV extension methods are frequently rejected by HTTP proxies even when ordinary GET
+    // requests work. Connect directly so Windows proxy/VPN settings cannot turn PROPFIND into 405.
+    let webdav_http = reqwest::Client::builder()
+        .user_agent("Cataclysm-Hub/0.1")
+        .no_proxy()
+        .build()
+        .expect("direct WebDAV HTTP client should initialize");
 
     tauri::Builder::default()
-        .manage(AppState { http })
+        .manage(AppState { http, webdav_http })
         .invoke_handler(tauri::generate_handler![
             fetch_releases,
             install_release,

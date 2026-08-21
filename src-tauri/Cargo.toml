@@ -11,7 +11,7 @@ tauri-build = { version = "2.5.1", features = [] }
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 futures-util = "0.3"
-keyring = { version = "3", default-features = false, features = ["apple-native"] }
+keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native"] }
 quick-xml = "0.37"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "stream", "rustls"] }
 rfd = "0.17.2"
@@ -22,3 +22,6 @@ tokio = { version = "1", features = ["fs", "io-util", "rt", "sync"] }
 tokio-util = { version = "0.7", features = ["io"] }
 uuid = { version = "1", features = ["v4"] }
 zip = { version = "9.0.0-pre3", default-features = false, features = ["deflate"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }

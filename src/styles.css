@@ -1,7 +1,7 @@
 :root {
   color: #20242b;
   background: #f4f5f7;
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Pretendard", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "SF Pro Text", "Pretendard", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
   font-synthesis: none;
   color-scheme: light;
   --canvas: #f4f5f7;
@@ -387,6 +387,10 @@ svg { display: block; width: 16px; height: 16px; fill: none; stroke: currentColo
 .webdav-form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .webdav-security-note { margin: -3px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .webdav-http-warning { margin: -5px 0 0; padding: 9px 10px; border: 1px solid #ead7ae; border-radius: 6px; color: var(--warning); background: #fff9eb; font-size: 11px; line-height: 1.5; }
+.restore-dialog { width: min(440px, 100%); }
+.restore-dialog .restore-warning { margin: 0 0 20px; color: #4a535e; font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }
+.restore-dialog .restore-warning strong { color: var(--text); font-weight: 680; }
+.restore-dialog .dialog-actions { justify-content: flex-end; }
 .dialog-actions { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
 .dialog-actions .test-connection { margin-left: auto; }
 .dialog-danger { padding: 4px 0; border: 0; color: var(--danger); background: transparent; font-size: 12px; font-weight: 620; cursor: pointer; }
