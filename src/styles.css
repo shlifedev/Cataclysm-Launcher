@@ -242,9 +242,14 @@ svg { display: block; width: 16px; height: 16px; fill: none; stroke: currentColo
 .backup-list { margin: 0; }
 .backup-row { display: grid; gap: 8px; padding: 12px 0; border-bottom: 1px solid #eceef1; }
 .backup-row:last-child { border-bottom: 0; }
-.backup-row > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.backup-row-details { display: grid; gap: 4px; }
+.backup-row-heading, .remote-backup-heading { display: flex; min-width: 0; align-items: center; gap: 6px; }
 .backup-row strong { color: #3d454f; font-size: 12px; font-weight: 620; }
 .backup-row span { color: var(--subtle); font-size: 11px; }
+.backup-source { display: inline-flex; flex: 0 0 auto; align-items: center; border-radius: 999px; padding: 2px 6px; font-size: 10px; font-weight: 650; line-height: 1.2; }
+.backup-source.local { color: #54616d; background: #eef1f4; }
+.backup-source.cloud { color: #3973b8; background: #eaf2ff; }
+.backup-row-meta, .remote-backup-meta { white-space: nowrap; }
 .inline-actions { display: flex; align-items: center; gap: 12px; }
 .inline-actions button { padding: 0; border: 0; color: var(--primary); background: transparent; font-size: 11px; font-weight: 600; cursor: pointer; }
 .inline-actions button:hover { color: var(--primary-hover); text-decoration: underline; }
@@ -257,8 +262,8 @@ svg { display: block; width: 16px; height: 16px; fill: none; stroke: currentColo
 .remote-backup-list { max-height: 248px; overflow: auto; scrollbar-color: #b7bec7 transparent; }
 .remote-backup-row { display: grid; min-height: 54px; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid #eceef1; }
 .remote-backup-row:last-child { border-bottom: 0; }
-.remote-backup-row > div { display: grid; min-width: 0; gap: 3px; }
-.remote-backup-row strong { overflow: hidden; color: #3d454f; font-size: 11px; font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }
+.remote-backup-details { display: grid; min-width: 0; gap: 4px; }
+.remote-backup-row strong { min-width: 0; overflow: hidden; color: #3d454f; font-size: 11px; font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }
 .remote-backup-row span { color: var(--subtle); font-size: 11px; }
 .list-surface { overflow: hidden; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
 .list-head {

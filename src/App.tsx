@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { formatBytes, formatDate } from "./lib/format";
+import { formatBytes, formatDate, formatDateTime } from "./lib/format";
 import type {
   BackupRecord,
   GameId,
@@ -634,7 +634,10 @@ export function App() {
                         <div className="backup-list">
                           {currentLocalBackups.slice(0, 3).map((backup) => (
                             <div className="backup-row" key={backup.id}>
-                              <div><strong>{formatDate(backup.createdAt)}</strong><span>{formatBytes(backup.size)}</span></div>
+                              <div className="backup-row-details">
+                                <div className="backup-row-heading"><span className="backup-source local">내 기기</span><strong>백업 생성</strong></div>
+                                <span className="backup-row-meta">{formatDateTime(backup.createdAt)} · {formatBytes(backup.size)}</span>
+                              </div>
                               <div className="inline-actions">
                                 <button onClick={() => void revealBackup(backup)}>위치 보기</button>
                                 <button onClick={() => void exportBackup(backup)}>내보내기</button>
@@ -679,7 +682,10 @@ export function App() {
                         <div className="remote-backup-list">
                           {remoteBackups[activeGame].map((remote) => (
                             <div className="remote-backup-row" key={remote.fileName}>
-                              <div><strong title={remote.fileName}>{remote.fileName}</strong><span>{remote.modifiedAt ? formatDate(remote.modifiedAt) : "날짜 정보 없음"} · {formatBytes(remote.size)}</span></div>
+                              <div className="remote-backup-details">
+                                <div className="remote-backup-heading"><span className="backup-source cloud">WebDAV</span><strong title={remote.fileName}>{remote.fileName}</strong></div>
+                                <span className="remote-backup-meta">업로드됨: {formatDateTime(remote.modifiedAt ?? "")} · {formatBytes(remote.size)}</span>
+                              </div>
                               <button className="text-button" disabled={cloudBusy === `restore:${remote.fileName}`} onClick={() => setRestoreConfirmation({ installation: currentInstallation, backup: remote })}>
                                 {cloudBusy === `restore:${remote.fileName}` ? "복원 중" : "복원"}
                               </button>
